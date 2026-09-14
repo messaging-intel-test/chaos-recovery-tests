@@ -1,0 +1,41 @@
+name: isolated infra recovery admission
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  state-isolation:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+        with:
+          node-version: "22.22.1"
+      - name: Prove modules-first provider and environment isolation
+        shell: bash
+        run: |
+          node <<'NODE'
+          const assert = require('node:assert/strict');
+          const providers = ['cloudflare', 'supabase', 'neon'];
+          const envs = ['preview', 'staging', 'production'];
+          const safe = s => /^[a-z][a-z0-9-]*$/.test(s) && !s.includes('..');
+          const moduleRoot = p => { if (!safe(p) || !providers.includes(p)) throw new Error('invalid_provider'); return `modules/${p}`; };
+          const stateKey = (p, e) => {
+            if (!safe(p) || !safe(e) || !providers.includes(p) || !envs.includes(e)) throw new Error('invalid_scope');
+            return `state/${p}/${e}/terraform.tfstate`;
+          };
+          const roots = providers.map(moduleRoot);
+          assert.deepEqual(roots, ['modules/cloudflare', 'modules/supabase', 'modules/neon']);
+          const keys = providers.flatMap(p => envs.map(e => stateKey(p, e)));
+          assert.equal(new Set(keys).size, 9);
+          assert.throws(() => stateKey('../cloudflare', 'preview'), /invalid_scope/);
+          assert.throws(() => stateKey('neon', '../production'), /invalid_scope/);
+          assert.equal(roots.some(r => /^cloudflare|^supabase|^neon/.test(r)), false, 'provider authority must not live at repository root');
+          NODE
